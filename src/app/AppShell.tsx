@@ -56,7 +56,12 @@ function EditorScreen() {
   const canvasRef = useRef<HTMLDivElement | null>(null)
   const activeObjectUrlRef = useRef<string | null>(null)
 
-  const apiBase = useMemo(() => import.meta.env.VITE_API_BASE_URL?.trim() || '/api', [])
+  const apiBase = useMemo(() => {
+    const runtimeApiBase = (window as Window & { __APP_CONFIG__?: { VITE_API_BASE_URL?: string } }).__APP_CONFIG__
+      ?.VITE_API_BASE_URL
+      ?.trim()
+    return runtimeApiBase || import.meta.env.VITE_API_BASE_URL?.trim() || '/api'
+  }, [])
   const items = state.document.items
   const selection = state.selection
   const selectedTargetIds = resolveTargetIds(items, selection.selectedIds)
