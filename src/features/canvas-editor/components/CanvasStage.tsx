@@ -6,6 +6,7 @@ import type { CanvasItem as CanvasItemType, Handle, Rect } from '../../../shared
 export function CanvasStage({
   canvasRef,
   backgroundImageUrl,
+  autoFitText,
   items,
   selectedIds,
   editingId,
@@ -24,6 +25,7 @@ export function CanvasStage({
 }: {
   canvasRef: React.RefObject<HTMLDivElement | null>
   backgroundImageUrl: string | null
+  autoFitText: boolean
   items: CanvasItemType[]
   selectedIds: string[]
   editingId: string | null
@@ -61,6 +63,7 @@ export function CanvasStage({
               <CanvasItem
                 key={item.id}
                 item={item}
+                autoFitText={autoFitText}
                 selected={selectedIds.includes(item.id)}
                 isEditing={editingId === item.id}
                 onPointerDown={(event) => onItemPointerDown(event, item.id)}

@@ -34,11 +34,86 @@ import type { EditorState } from './store/editorTypes'
 type CommandCtx<T = unknown> = { state: EditorState; payload: T }
 type ThemeMode = 'light' | 'dark'
 const THEME_KEY = 'ocr-editor-theme'
+const MIN_FONT_SIZE = 6
 const DEFAULT_OCR_DOC: RichTextDoc = {
   runs: [{ ...DEFAULT_RUN }],
   align: 'left',
   verticalAlign: 'top',
   padding: { top: 2, right: 2, bottom: 2, left: 2 },
+}
+
+function measureTextWidth(ctx: CanvasRenderingContext2D, text: string, letterSpacing: number) {
+  if (!text) return 0
+  const chars = Array.from(text)
+  let width = 0
+  for (const char of chars) {
+    width += ctx.measureText(char).width
+  }
+  return width + Math.max(0, chars.length - 1) * letterSpacing
+}
+
+function wrapLine(ctx: CanvasRenderingContext2D, text: string, maxWidth: number, letterSpacing: number) {
+  if (!text) return ['']
+  const lines: string[] = []
+  let current = ''
+  for (const char of Array.from(text)) {
+    const next = current + char
+    if (!current || measureTextWidth(ctx, next, letterSpacing) <= maxWidth) {
+      current = next
+      continue
+    }
+    lines.push(current)
+    current = char
+  }
+  lines.push(current)
+  return lines
+}
+
+function buildWrappedLines(ctx: CanvasRenderingContext2D, text: string, maxWidth: number, letterSpacing: number) {
+  const segments = text.split('\n')
+  return segments.flatMap((segment) => wrapLine(ctx, segment, maxWidth, letterSpacing))
+}
+
+function fitFontSizeForBox(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  run: RichTextRun,
+  maxWidth: number,
+  maxHeight: number,
+  autoFitText: boolean,
+) {
+  const computeHeight = (size: number) => {
+    ctx.font = `${run.fontStyle} ${run.fontWeight} ${size}px ${run.fontFamily}`
+    const lines = buildWrappedLines(ctx, text, maxWidth, run.letterSpacing)
+    return lines.length * size * run.lineHeight
+  }
+
+  if (!autoFitText) return Math.max(MIN_FONT_SIZE, run.fontSize)
+
+  let lo = MIN_FONT_SIZE
+  let hi = Math.max(48, Math.ceil(run.fontSize))
+  let best = MIN_FONT_SIZE
+
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2)
+    if (computeHeight(mid) <= maxHeight) {
+      best = mid
+      lo = mid + 1
+    } else {
+      hi = mid - 1
+    }
+  }
+
+  return best
+}
+
+function loadImage(url: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = () => reject(new Error('图片加载失败'))
+    img.src = url
+  })
 }
 
 function EditorScreen() {
@@ -48,6 +123,7 @@ function EditorScreen() {
   const [imageFile, setImageFile] = useState<File | null>(null)
   const [ocrDefaultDoc, setOcrDefaultDoc] = useState<RichTextDoc>(DEFAULT_OCR_DOC)
   const [ocrDefaultOpacity, setOcrDefaultOpacity] = useState(1)
+  const [autoFitText, setAutoFitText] = useState(true)
   const [theme, setTheme] = useState<ThemeMode>(() => {
     const stored = localStorage.getItem(THEME_KEY)
     if (stored === 'light' || stored === 'dark') return stored
@@ -357,6 +433,81 @@ function EditorScreen() {
     [activeItem, applyCommand],
   )
 
+  const onExportImage = useCallback(async () => {
+    const backgroundImageUrl = state.document.backgroundImageUrl
+    if (!backgroundImageUrl) {
+      dispatch({ type: 'UI/SET_ERROR', payload: '请先上传图片' })
+      return
+    }
+
+    try {
+      const image = await loadImage(backgroundImageUrl)
+      const canvas = document.createElement('canvas')
+      canvas.width = image.naturalWidth || image.width
+      canvas.height = image.naturalHeight || image.height
+      const ctx = canvas.getContext('2d')
+      if (!ctx) throw new Error('导出失败：无法创建画布')
+
+      ctx.drawImage(image, 0, 0, canvas.width, canvas.height)
+      const textItems = state.document.items.filter((item): item is CanvasItem => item.type === 'text' && Boolean(item.text))
+      textItems.sort((a, b) => a.zIndex - b.zIndex)
+
+      for (const item of textItems) {
+        if (!item.text) continue
+        const run = item.text.runs[0]
+        const boxX = item.x * canvas.width
+        const boxY = item.y * canvas.height
+        const boxW = item.w * canvas.width
+        const boxH = item.h * canvas.height
+        const contentW = Math.max(1, boxW - item.text.padding.left - item.text.padding.right)
+        const contentH = Math.max(1, boxH - item.text.padding.top - item.text.padding.bottom)
+
+        ctx.save()
+        const cx = boxX + boxW / 2
+        const cy = boxY + boxH / 2
+        ctx.translate(cx, cy)
+        ctx.rotate((item.rotation * Math.PI) / 180)
+        ctx.translate(-cx, -cy)
+        ctx.globalAlpha = item.opacity
+
+        ctx.fillStyle = '#ffffff'
+        ctx.fillRect(boxX, boxY, boxW, boxH)
+
+        const fontSize = fitFontSizeForBox(ctx, run.text, run, contentW, contentH, autoFitText)
+        ctx.font = `${run.fontStyle} ${run.fontWeight} ${fontSize}px ${run.fontFamily}`
+        ctx.fillStyle = run.color
+        ctx.textBaseline = 'top'
+        const lines = buildWrappedLines(ctx, run.text, contentW, run.letterSpacing)
+        const lineHeightPx = fontSize * run.lineHeight
+        let y = boxY + item.text.padding.top
+
+        for (const line of lines) {
+          if (y + lineHeightPx > boxY + boxH - item.text.padding.bottom + 0.1) break
+          const lineWidth = measureTextWidth(ctx, line, run.letterSpacing)
+          let x = boxX + item.text.padding.left
+          if (item.text.align === 'center') x += Math.max(0, (contentW - lineWidth) / 2)
+          else if (item.text.align === 'right') x += Math.max(0, contentW - lineWidth)
+          if (run.strokeWidth > 0) {
+            ctx.lineWidth = run.strokeWidth
+            ctx.strokeStyle = run.strokeColor
+            ctx.strokeText(line, x, y)
+          }
+          ctx.fillText(line, x, y)
+          y += lineHeightPx
+        }
+
+        ctx.restore()
+      }
+
+      const a = document.createElement('a')
+      a.href = canvas.toDataURL('image/png')
+      a.download = `ocr-editor-${Date.now()}.png`
+      a.click()
+    } catch (error) {
+      dispatch({ type: 'UI/SET_ERROR', payload: error instanceof Error ? error.message : '导出图片失败' })
+    }
+  }, [autoFitText, dispatch, state.document.backgroundImageUrl, state.document.items])
+
   const onPointerMove = useCallback(
     (event: PointerEvent, interaction: InteractionState) => {
       const canvas = canvasRef.current
@@ -590,16 +741,19 @@ function EditorScreen() {
     <main className="ed-root">
       <TopToolbar
         theme={theme}
+        autoFitText={autoFitText}
         isLoading={state.ui.isLoadingOCR}
         canUndo={state.history.past.length > 0}
         canRedo={state.history.future.length > 0}
         canGroup={selection.selectedIds.length > 1}
         onUpload={onUpload}
         onToggleTheme={() => setTheme((prev) => (prev === 'light' ? 'dark' : 'light'))}
+        onToggleAutoFitText={() => setAutoFitText((prev) => !prev)}
         onStartOcr={startOCR}
         onUndo={() => dispatch({ type: 'HISTORY/UNDO' })}
         onRedo={() => dispatch({ type: 'HISTORY/REDO' })}
         onGroup={groupSelection}
+        onExportImage={onExportImage}
       />
 
       {state.ui.error ? <div className="ed-error">{state.ui.error}</div> : null}
@@ -608,6 +762,7 @@ function EditorScreen() {
         <CanvasStage
           canvasRef={canvasRef}
           backgroundImageUrl={state.document.backgroundImageUrl}
+          autoFitText={autoFitText}
           items={items}
           selectedIds={selection.selectedIds}
           editingId={state.ui.editingId}

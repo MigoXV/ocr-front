@@ -1,7 +1,14 @@
+import { useLayoutEffect, useRef, useState } from 'react'
 import type { CanvasItem as CanvasItemType } from '../../../shared/types/canvas'
+
+function fitsBox(el: HTMLDivElement, size: number) {
+  el.style.fontSize = `${size}px`
+  return el.scrollWidth <= el.clientWidth + 0.5 && el.scrollHeight <= el.clientHeight + 0.5
+}
 
 export function CanvasItem({
   item,
+  autoFitText,
   selected,
   isEditing,
   onPointerDown,
@@ -10,6 +17,7 @@ export function CanvasItem({
   onBlur,
 }: {
   item: CanvasItemType
+  autoFitText: boolean
   selected: boolean
   isEditing: boolean
   onPointerDown: (event: React.PointerEvent) => void
@@ -17,8 +25,62 @@ export function CanvasItem({
   onDoubleClick: () => void
   onBlur: (event: React.FocusEvent<HTMLDivElement>) => void
 }) {
-  if (item.type !== 'text' || !item.text) return null
-  const run = item.text.runs[0]
+  const textRef = useRef<HTMLDivElement | null>(null)
+  const [fitFontSize, setFitFontSize] = useState<number | null>(null)
+  const text = item.type === 'text' ? item.text : undefined
+  const run = text?.runs[0]
+
+  useLayoutEffect(() => {
+    if (!text || !run) return
+    if (!autoFitText || isEditing) {
+      setFitFontSize(null)
+      return
+    }
+
+    const el = textRef.current
+    if (!el || el.clientWidth < 1 || el.clientHeight < 1) return
+
+    const prev = el.style.fontSize
+    const minSize = 6
+    const maxSize = Math.max(48, Math.ceil(run.fontSize))
+    let lo = minSize
+    let hi = maxSize
+    let best = minSize
+
+    while (lo <= hi) {
+      const mid = Math.floor((lo + hi) / 2)
+      if (fitsBox(el, mid)) {
+        best = mid
+        lo = mid + 1
+      } else {
+        hi = mid - 1
+      }
+    }
+
+    el.style.fontSize = prev
+    setFitFontSize(best)
+  }, [
+    autoFitText,
+    isEditing,
+    item.h,
+    item.w,
+    text,
+    text?.align,
+    text?.padding.bottom,
+    text?.padding.left,
+    text?.padding.right,
+    text?.padding.top,
+    run?.fontFamily,
+    run?.fontStyle,
+    run?.fontWeight,
+    run?.letterSpacing,
+    run?.lineHeight,
+    run?.text,
+  ])
+
+  if (!text || !run) return null
+
+  const resolvedFontSize = autoFitText && !isEditing ? fitFontSize || run.fontSize : run.fontSize
 
   return (
     <article
@@ -36,15 +98,16 @@ export function CanvasItem({
       onContextMenu={onContextMenu}
     >
       <div
+        ref={textRef}
         className={`ed-item-text ${isEditing ? 'is-editing' : ''}`}
         contentEditable={isEditing}
         suppressContentEditableWarning
         onDoubleClick={onDoubleClick}
         onBlur={onBlur}
         style={{
-          textAlign: item.text.align,
+          textAlign: text.align,
           fontFamily: run.fontFamily,
-          fontSize: `${run.fontSize}px`,
+          fontSize: `${resolvedFontSize}px`,
           fontWeight: run.fontWeight,
           fontStyle: run.fontStyle,
           color: run.color,
@@ -54,7 +117,7 @@ export function CanvasItem({
           WebkitTextStrokeColor: run.strokeColor,
           WebkitTextStrokeWidth: `${run.strokeWidth}px`,
           textShadow: run.shadow,
-          padding: `${item.text.padding.top}px ${item.text.padding.right}px ${item.text.padding.bottom}px ${item.text.padding.left}px`,
+          padding: `${text.padding.top}px ${text.padding.right}px ${text.padding.bottom}px ${text.padding.left}px`,
         }}
       >
         {run.text}
